@@ -1,0 +1,194 @@
+!(------Assigment 1 - Manh Tuan Nguyen - 18201747
+!-----------Article no. 7: An Optimization Model for Empty Freight Car Assignment at Union Pacific RailRoad
+!---------------Amar Kumar Narisetty, Jean-Phillippe P.Richard
+!---------------David Ramcharan
+!---------------Deby Murphy, Gayle Minks
+!---------------Jim Fuller--------------------------------------------)
+
+model Assignment1Nguyen
+  uses "mmxprs", "mmsheet", "advmod"
+  uses "mmsystem"
+
+ !procedure to check problem status - from file augmented_pottery.mos - Dr. Paula Carroll
+  procedure print_status
+    declarations
+      status: string
+    end-declarations
+    case getprobstat of
+      XPRS_OPT: status:="LP Optimum found"
+      XPRS_UNF: status:="Unfinished"
+      XPRS_INF: status:="Infeasible"
+      XPRS_UNB: status:="Unbounded"
+      XPRS_OTH: status:="Failed"
+    else status:="???"
+    end-case
+  writeln("Problem status: ", status)
+  end-procedure
+
+  ! assign variables, constraint and constant
+  declarations
+
+    s: set of real   ! set of supply car groups with identical characteristics (supply point)
+    d: set of real   ! set of demands car groups with identical characteristics (demand point)
+    prio = 1..4      ! set of priority
+  end-declarations
+
+  declarations
+    n:  array(s) of real   ! number of cars in group s
+    cs: array(s) of string ! car type available at s
+
+    a:  array(d) of real               ! number of car to satisfied demand
+    t:  array(d) of real               ! number of days on which demand of d is due
+    cd: array(d) of string             ! car type required at demand d
+    p:  array(d) of string             ! set of car types that can be substituted for demand d
+
+    !using dynamic array to assure the model work well in case data is sparse
+    priorityday: dynamic array(d,prio) of real                ! days in which demand d belongs to tier of priority i
+    reqday: dynamic array(s,d) of real                        ! days required for shipping cars of group s to demand d
+    Cmileage: dynamic array(s,d) of real                      ! mileage per car for sending cars
+    Ctransit: dynamic array(s,d) of real                      ! transit cost per card for sending cars
+    Cchanges: dynamic array(s,d) of real                      ! train changes cost per car for sending cars
+    Cpen: dynamic array(s,d) of real                          ! penalty cost per car for sending car
+    CODincent: dynamic array(s,d) of real                     ! OD incentive cost per car
+
+    x: array(s,d) of mpvar               ! number of car of group s sent to demand d
+    y: array(d) of mpvar                 ! number of unmet demand at each customer
+    z: array(s) of mpvar                 ! number of cars of group s not assigned to demands
+
+    adjpen: array(s,d) of mpvar          ! tuning parameter of early/late penalty cost
+
+    holdcost: array(s) of real           ! holding cost per car for not using the supply of group
+    pencost:  array(d) of real           ! penalty cost for not satisfying demand d
+
+    Maxday: real                         ! maximum number of transit days of an acceptable assignment
+    Maxdaylate: real                     ! maximum number of days late a car can be delivered
+    Maxdayearly: real                    ! maximum number of days early a car can be delivered
+
+    ra = 1..8                            ! parameters for boolean value
+    Logic: array(ra, s, d) of boolean
+
+  end-declarations
+
+  !Read data from database excel file
+
+  initialisations from 'mmsheet.xlsx:data.xlsx'
+
+    [n, cs, holdcost]      as '[SupplyDemand$A2:D6]'
+    [a, t, cd, p, pencost] as '[SupplyDemand$E2:J11]'
+
+    Cmileage as 'partndx;[mileage$A2:K6]'
+    Ctransit as 'partndx;[transit$A2:K6]'
+    Cchanges as 'partndx;[change$A2:K6]'
+    Cpen     as 'partndx;[penalty$A2:K6]'
+    CODincent   as 'partndx;[ODincentive$A2:K6]'
+    priorityday as 'partndx;[priority$A3:E7]'
+    reqday      as 'partndx;[reqday$A2:K6]'
+
+    Maxday      as '[maxday$A2]'
+    Maxdaylate  as '[maxday$B2]'
+    Maxdayearly as '[maxday$C2]'
+
+  end-initialisations
+
+  !Logic declaration
+  forall(i in s, j in d) do
+    Logic(1,i,j) := reqday(i,j) <= Maxday                   ! days required for shipping car less or equal to Maxday
+    Logic(2,i,j) := reqday(i,j) <= t(j) + Maxdaylate        ! days required for shipping car less or equal to sum of number of days demand due and maximum late days
+    Logic(3,i,j) := reqday(i,j) >= t(j) - Maxdayearly       ! days required for shipping car more or equal to number of days demand due - maximum late days
+    Logic(4,i,j) := priorityday(j, 2) <= reqday(i,j)        ! days required for shipping car is from priority tier 2-4
+    Logic(5,i,j) := reqday(i,j) < priorityday(j,4)          ! days required for shipping car is from priority tier 2-4
+    Logic(6,i,j) := cs(i) = cd(j)                           ! type of car at supply point matches the prefered type of car at demand point
+    Logic(7,i,j) := reqday(i,j) < priorityday(j,2)          ! days required for shipping car is in priority tier 1
+    Logic(8,i,j) := cs(i) = p(j)                            ! type of car at supply point matches with substitution for type of car at demand point
+  end-do
+
+  ! Objective functions
+  Z:= sum(i in s, j in d)(Cmileage(i,j) + Ctransit(i,j) + Cchanges(i,j) + CODincent(i,j))*x(i,j) + sum(i in s, j in d) adjpen(i,j) * Cpen(i,j) + sum(i in s) holdcost(i)*z(i) + sum(j in d)pencost(j)*y(j)
+
+  ! CONSTRAINT DECLARATION
+
+  !total number of cars sent from a supply point and the unassigned cars from that point must equal to the number of available cars at that point before assignment
+  forall(j in d) sum(i in s) x(i,j) + y(j) = a(j)                     !
+
+  !total number of cars assigned to a demand point and the unfulfilled demand must equal to the number of required cars at that point before assignment
+  forall(i in s) sum(j in d) x(i,j) + z(i) = n(i)
+
+  ! if the requirement time of delivery is in the allowed time window, there is no early/late delivery penalty
+  forall(i in s, j in d) do
+    if (Logic(1,i,j) and Logic(2,i,j) and Logic(3,i,j))
+    then adjpen(i,j) = 0
+    else adjpen(i,j) = 1
+    end-if
+    end-do
+
+  (! if the required time of delivery is not in the allowed time window and the type of car at supply point not match with the type of car at demand point (priority tier 2-4)
+  or not match with both type of car and type of substitution car at demand point (priority tier 1), there will be no car sent from supply point to demand point.!)
+  forall(i in s, j in d) do
+   if (not(Logic(1,i,j) and Logic(2,i,j) and Logic(3,i,j) and ((Logic(4,i,j) and Logic(5,i,j) and Logic(6,i,j)) or (Logic(7,i,j) and (Logic(6,i,j) or Logic(8,i,j))))))
+      then x(i,j) = 0
+    end-if
+    end-do
+
+  ! all decision variables are integer and >= 0
+  forall(i in s, j in d) x(i,j) >= 0
+  forall(j in d) y(j) >= 0
+  forall(i in s) z(i) >= 0
+  forall(i in s, j in d) do
+    x(i,j) is_integer
+    end-do
+  forall(j in d) do
+    y(j) is_integer
+    end-do
+  forall(i in s) do
+    z(i) is_integer
+    end-do
+
+  ! Solve problems
+  minimise(Z)
+
+  print_status
+  
+  !Print solutions as table
+  declarations
+  rsum: array(d) of integer         ! Auxiliary data table for printing
+  psum, ct, iflow: integer          ! Counters
+  end-declarations
+  writeln("\nCar assignment at UP on day ", date(SYS_NOW),"\n", "="*50)          ! Solution printing, taking current system time as the time for assignment
+
+  writeln("Least cost solution found: ", getobjval)
+  write("\nCars Allocation: \n", "~"*50,"\n")
+  writeln(strfmt("Demand points",60))
+  write(strfmt("",16),"| ")
+  forall(j in d) write(strfmt(j,10))
+  writeln(" |", strfmt("Assigned",10), "    Capacity", "    Unassigned cars")
+  writeln("-"*160)
+
+  ct:=0
+  forall(i in s, ct as counter) do
+   if ct=2 then
+     write(" Supply   ", strfmt(i,-6), "|")
+   else
+     write("          ", strfmt(i,-6), "|")
+   end-if
+   psum:=0
+   forall(j in d) do
+     iflow:=integer(x(i,j).sol)
+     psum += iflow
+     rsum(j) += iflow
+     if iflow<>0 then
+       write(strfmt(iflow,10))
+     else
+       write("         -")
+     end-if
+   end-do
+   writeln("  |", strfmt(psum,6), strfmt(integer(n(i)),12), strfmt(integer(z(i).sol),15))
+  end-do
+  writeln("-"*160)
+  write(strfmt("TOTAL DEMAND   ",16),"| ")
+  forall(j in d) write(strfmt(a(j),10))
+  writeln("\n")
+  write(strfmt("Unmet demand   ",16),"| ")
+  forall(j in d) write(strfmt(y(j).sol,10))
+  writeln("\n")
+
+  end-model
